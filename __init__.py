@@ -1,4 +1,4 @@
-"""pdf-surgeon — replace text in a PDF with no visible edit.
+"""pdf-surgeon — replace text in a PDF, keeping its original typesetting.
 
 Registers one tool, `pdf_replace_text`, into the ``pdf_surgery`` toolset.
 
@@ -15,6 +15,8 @@ word/run with an explicit Tm origin, which is what Word, LibreOffice, Excel,
 Google Docs and most digital-born PDFs emit. It refuses rather than guessing:
 no phrase match, no usable font metrics, or a replacement glyph the embedded
 subset does not contain all end the call without writing an output file.
+The output is written under a temporary name next to the destination and
+moved into place only after verification passes.
 """
 
 from __future__ import annotations
@@ -55,18 +57,23 @@ def _check_pymupdf() -> bool:
 PDF_REPLACE_TEXT_SCHEMA: Dict[str, Any] = {
     "name": "pdf_replace_text",
     "description": (
-        "Replace a phrase inside an existing PDF so the edit is not visible, "
-        "by rewriting the page content stream in place. Use for amended "
-        "documents, reissued certificates, filled-in templates — anywhere the "
-        "text has to change but the page must keep looking untouched. Inspect "
-        "the layout first with action='inspect': it prints each text line and "
-        "how many BT/ET blocks it is built from, and refuses on scans or "
-        "Type3/XObject text, which this cannot edit. Every replacement is "
-        "verified before it is accepted: the edited line must read exactly as "
-        "the original with the phrase swapped and nothing else, block count "
-        "must hold, font/size/colour must be unchanged, and the pixel diff "
-        "must stay within one band over the edited line. Never overwrites the "
-        "input — always writes a new file."
+        "Replace a phrase in a digital-born PDF by rewriting the page content "
+        "stream in place, so the new text keeps the original font, size, "
+        "colour and spacing. For correcting or filling in documents the user "
+        "is entitled to change (typos, template fields, their own drafts). "
+        "Inspect the layout first with action='inspect': it prints each text "
+        "line and how many BT/ET blocks it is built from; scans, Type3/XObject "
+        "text and pages with several content streams cannot be edited. The "
+        "phrase must match exactly (whitespace is ignored). Unless verify is "
+        "false, the edit is checked before anything is written: the edited "
+        "line must read exactly as the original with the phrase swapped, "
+        "every other line on the page must be unchanged, block count, "
+        "baseline, font, size and spacing must hold, and the page's "
+        "font/size/colour set must be unchanged. A pixel-diff band is "
+        "reported for information. If a check fails, nothing is written. "
+        "Always writes a new file: 'out' must end in .pdf and must not exist "
+        "yet. The file is re-saved by PyMuPDF, so its bytes, hash and trailer "
+        "ID change and any digital signature on it no longer validates."
     ),
     "parameters": {
         "type": "object",
@@ -98,7 +105,8 @@ PDF_REPLACE_TEXT_SCHEMA: Dict[str, Any] = {
             "out": {
                 "type": "string",
                 "description": (
-                    "Output path. Defaults to the input path plus "
+                    "Output path for the new PDF. Must end in .pdf and must "
+                    "not already exist. Defaults to the input path plus "
                     "'_editado.pdf'. The source is never overwritten."
                 ),
             },
@@ -109,9 +117,9 @@ PDF_REPLACE_TEXT_SCHEMA: Dict[str, Any] = {
             "verify": {
                 "type": "boolean",
                 "description": (
-                    "Run the full verification pass. Default true. Only "
-                    "disable it when you have no way to check the output "
-                    "yourself — an unverified edit may be subtly wrong."
+                    "Run the verification pass. Default true. With false the "
+                    "edited file is written without any checks and may be "
+                    "subtly wrong."
                 ),
             },
         },
@@ -135,11 +143,14 @@ def _handle_pdf_replace_text(args: Dict[str, Any]):
         return "error: 'pdf' is required"
     if action not in ("inspect", "replace"):
         return "error: action must be 'inspect' or 'replace'"
+    try:
+        page = int(args.get("page") or 0)
+    except (TypeError, ValueError):
+        return "error: 'page' must be an integer"
 
     if action == "inspect":
         code, report = surgery.replace_text(pdf, out=args.get("out") or _scratch(pdf),
-                                            page=int(args.get("page") or 0),
-                                            list_lines=True)
+                                            page=page, list_lines=True)
         return report
 
     find, replace = args.get("find"), args.get("replace")
@@ -150,14 +161,14 @@ def _handle_pdf_replace_text(args: Dict[str, Any]):
     code, report = surgery.replace_text(
         pdf, find, replace,
         out=args.get("out"),
-        page=int(args.get("page") or 0),
+        page=page,
         verify=bool(args.get("verify", True)),
     )
     if code == 0:
         return report
     # Surface the refusal reason first: the transcript is long and the reason
     # is the one line that decides what the caller does next.
-    return "edit refused or failed (code %d) — nothing was written to a final path\n\n%s" % (code, report)
+    return "edit refused or failed (code %d) — no output file was written\n\n%s" % (code, report)
 
 
 def _scratch(pdf: str) -> str:

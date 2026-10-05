@@ -47,10 +47,18 @@ Every replacement is checked before the result is accepted:
 | edited line reads exactly as the original with the phrase swapped, nothing else | neighbouring words silently eaten |
 | block count on the line unchanged | an edit that dropped a block |
 | no baseline / font / size / `Tc` / `Tw` / `Tz` drift | restyling of untouched runs |
-| each block moved by exactly the accumulated width delta, and only if it comes after the first edit | reflow drift |
+| every other line on the page has the same blocks and text | collateral edits off the target line |
 | `(font, size, colour)` set unchanged page-wide | a new face sneaking in |
-| page count, not encrypted, not repaired | structural damage |
-| pixel diff confined to one horizontal band over the edited line | changes anywhere else on the page |
+| the phrase occurs once less (plus any copies inside the replacement) | the edit landing nowhere |
+| page count unchanged | structural damage |
+
+Reported for the caller to read, not part of PASS/FAIL: how many blocks moved,
+whether the output is encrypted or was repaired, and the pixel-diff band
+(rows and x-range of changed pixels).
+
+The phrase must match exactly (whitespace ignored); there is no fuzzy
+fallback, so a near miss is refused instead of editing similar text. Pages
+with more than one content stream are refused.
 
 The first one is the decisive check. The others can all pass while surrounding
 words have been eaten; only that one cannot. It is why "the old phrase is gone"
@@ -60,8 +68,13 @@ report success on those alone.
 ## Safety
 
 The input file is **never** modified. Output goes to `out`, defaulting to the
-input path plus `_editado.pdf`. Refusals (no match, no usable font, missing
-glyph) leave no output file behind.
+input path plus `_editado.pdf`. `out` must end in `.pdf` and must not already
+exist (so it can never be the input, an existing file, or a symlink); the
+tool refuses otherwise. The edited file is saved under a temporary
+`.pdf-surgeon-*.pdf` name in the destination directory, verified there, and
+moved to `out` only if verification passes. Refusals and failed verifications
+leave no output file behind. With `verify=false` the file is written
+unchecked.
 
 ## Disclosure
 
@@ -69,8 +82,10 @@ For the catalog reviewer, stated plainly so it does not have to be inferred:
 
 - **Files read**: only the source PDF you name, and (via PyMuPDF) the font
   programs embedded in it. Nothing outside the given paths.
-- **Files written**: only the `out` path you name. The input PDF is opened
-  read-only and is never written back. Refusals write nothing.
+- **Files written**: only the `out` path you name, which must be a new `.pdf`,
+  plus a temporary file beside it that is removed before the call returns.
+  The input PDF is opened read-only and is never written back. Refusals and
+  failed verifications write nothing.
 - **Network**: none. No telemetry, no analytics, no update check, no remote
   fetch of any kind. The plugin never replaces its own files.
 - **Credentials**: none. No `requires_env`, no secrets, no reads of any other
@@ -79,14 +94,26 @@ For the catalog reviewer, stated plainly so it does not have to be inferred:
   timers. No waits on a human, so it behaves identically under cron and the
   messaging gateway.
 - **Host**: pure computation via PyMuPDF. One declared dependency,
-  `pymupdf` (BSD-3-Clause), which is already a Hermes core dependency.
+  `pymupdf>=1.24.3,<2`, installed by Hermes for this plugin (it is not a
+  Hermes core dependency).
 - **Hermes core**: untouched. Extends only via `ctx.register_tool`, and runs
   only when the agent calls the tool.
 
 The one thing worth a user's attention is inherent to what the tool is for:
-it edits a PDF so the change is hard to detect. That is the point of the tool,
-and it is why the verification pass is strict — but it is a real property of
-the capability, not an accident, so a reviewer should weigh it consciously.
+the edited page looks typeset by the original author. What does change, and
+what a document examiner can check: the file is re-saved by PyMuPDF as a
+single revision, so its bytes and hash differ, the second half of the trailer
+`/ID` changes, any earlier incremental-save history is dropped, and any
+digital signature no longer validates. The Info dictionary (producer,
+modification date) is left as it was. Use it on documents you are entitled
+to change.
+
+## License note
+
+PyMuPDF is licensed under the GNU AGPL-3.0 (or a commercial license from
+Artifex). This plugin imports it at runtime; if you redistribute the plugin
+together with PyMuPDF, or offer it as a network service, check that the AGPL
+terms work for you.
 
 ## Notes for the curious
 
