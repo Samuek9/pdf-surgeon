@@ -1,0 +1,9 @@
+name: pdf-surgeon
+version: 1.0.0
+description: "Replace text inside an existing PDF with no visible edit. Edits the page content stream in place — font, size, colour, baseline and letter spacing are preserved because they are never touched — and refuses rather than silently substituting a different typeface. Requires a digital-born PDF whose text is laid out as BT/ET blocks with explicit Tm origins (Word, LibreOffice, Excel, Google Docs); not for scans."
+author: Samuek9
+kind: backend
+python_dependencies:
+  - pymupdf
+provides_tools:
+  - pdf_replace_text
