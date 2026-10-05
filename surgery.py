@@ -32,6 +32,7 @@ import io
 import os
 import re
 import sys
+import tempfile
 
 try:
     import pymupdf
@@ -167,17 +168,9 @@ def font_metrics(doc, page, blocks):
             except Exception:
                 notes.append("%s: no embedded program and no base font" % name)
             continue
-        tmp = os.path.join(os.environ.get("TMPDIR", "."),
-                           "_fnt_%s.%s" % (bare.replace("#", "_"), ext or "ttf"))
-        with open(tmp, "wb") as fh:
-            fh.write(buf)
-        try:
-            table[name] = pymupdf.Font(fontfile=tmp)
-        finally:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        # Load straight from memory: no temp file, so nothing lands in a
+        # shared TMPDIR (or the CWD) under a predictable name.
+        table[name] = pymupdf.Font(fontbuffer=buf)
     return table, notes
 
 
@@ -242,9 +235,11 @@ def align_to_find(line, find):
 
     Matching ignores whitespace, because where the exporter put spaces is an
     artefact of the exporter ('( 06 )' is three blocks), not something the
-    caller knows or cares about. Exact match first, then a difflib long match
-    with a 60% overlap floor, so a wrong phrase errors out instead of quietly
-    editing the wrong line.
+    caller knows or cares about. The match must be exact (modulo
+    whitespace): a fuzzy fallback would edit text the caller never named --
+    'Invoice 0013' would rewrite an 'Invoice 0018' line -- and verification
+    cannot catch that, because it checks the edit against the span that was
+    matched, not the one that was meant.
     """
     target = strip_ws(find)
     if not target:
@@ -253,11 +248,7 @@ def align_to_find(line, find):
     hay = strip_ws(raw)
     idx = hay.find(target)
     if idx < 0:
-        m = difflib.SequenceMatcher(None, hay, target, autojunk=False) \
-            .find_longest_match(0, len(hay), 0, len(target))
-        if m.size < max(4, int(0.6 * len(target))):
-            return None
-        idx = m.a
+        return None
     lo, hi = idx, idx + len(target)
 
     acc, first, last = 0, None, None
@@ -321,6 +312,14 @@ def plan_edits(target, new_text, lo=0, hi=None):
         end = pos[gi2 - 1] + 1 if gi2 > gi1 else start
         repl = new[j1:j2]
         anchor = owner[gi1] if gi1 < len(owner) else (owner[gi1 - 1] if gi1 else 0)
+        if end == start:
+            # Pure insertion. When it falls on a block boundary no block
+            # overlaps the empty span, so the overlap loop below would drop it
+            # and report "already reads that way". Put it in the anchor block.
+            a, e = offs[anchor]
+            at = min(max(start - a, 0), e - a)
+            edits.setdefault(anchor, []).append((at, at, repl))
+            continue
         for bi in range(len(target)):
             a, e = offs[bi]
             if e <= start or a >= end:                     # no overlap
@@ -392,6 +391,14 @@ def faces(doc, pno):
 def verify(src, out, pno, y, find, replace, expected_line, raster=True):
     print("\n--- verify ---")
     a, b = pymupdf.open(src), pymupdf.open(out)
+    try:
+        return _verify(a, b, pno, y, find, replace, expected_line, raster)
+    finally:
+        a.close()
+        b.close()
+
+
+def _verify(a, b, pno, y, find, replace, expected_line, raster):
     ok = True
     print("pages %d -> %d   encrypted=%s  repaired=%s"
           % (a.page_count, b.page_count, b.is_encrypted, b.is_repaired))
@@ -417,6 +424,15 @@ def verify(src, out, pno, y, find, replace, expected_line, raster=True):
         if abs(x.tc - z.tc) > 0.001 or abs(x.tw - z.tw) > 0.001 \
                 or abs(x.tz - z.tz) > 0.001:
             print("  FAIL spacing drift on %r" % x.text); ok = False
+    # Everything off the edited line must be untouched: same lines, same
+    # blocks, same text. This is what makes "nothing else changed" true for
+    # the page rather than just for the edited line.
+    others_a = {k: [x.text for x in v] for k, v in group_lines(ba).items()
+                if k != round(y, 1)}
+    others_b = {k: [x.text for x in v] for k, v in group_lines(bb).items()
+                if k != round(y, 1)}
+    print("other lines on the page unchanged: %s" % (others_a == others_b))
+    ok &= others_a == others_b
     print("blocks whose text changed: %d  %s" % (len(changed), changed))
     print("blocks that moved (reflow):  %d" % len(moved))
     ok &= bool(changed)
@@ -446,10 +462,15 @@ def verify(src, out, pno, y, find, replace, expected_line, raster=True):
         print("  only in edited  : %s" % sorted(fb - fa))
     ok &= fa == fb
 
-    txt = strip_ws(b[pno].get_text())
-    gone = strip_ws(find) not in txt
-    present = strip_ws(replace.split()[0]) in txt
-    print("old phrase removed: %s   new word present: %s" % (gone, present))
+    txt_a, txt = strip_ws(a[pno].get_text()), strip_ws(b[pno].get_text())
+    f, r = strip_ws(find), strip_ws(replace)
+    # exactly one occurrence of `find` went away (plus any that `replace`
+    # itself contains): works when the phrase repeats on the page or is a
+    # substring of its replacement
+    gone = txt.count(f) == txt_a.count(f) - 1 + r.count(f)
+    words = replace.split()
+    present = (strip_ws(words[0]) in txt) if words else True
+    print("old phrase removed once: %s   new word present: %s" % (gone, present))
     ok &= gone and present
 
     if raster:
@@ -499,10 +520,10 @@ def verify(src, out, pno, y, find, replace, expected_line, raster=True):
                      rows[0] / zoom, rows[-1] / zoom))
         else:
             print("pixel diff: none (unexpected -- nothing changed?)")
+        # informational only: the band is reported for the caller to read,
+        # it does not decide PASS/FAIL
 
     print("RESULT: %s" % ("PASS" if ok else "FAIL"))
-    a.close()
-    b.close()
     return 0 if ok else 1
 
 
@@ -519,10 +540,17 @@ def run(a):
 
     Prints a human-readable report and returns a process-style exit code:
     0 ok, 1 verification failed, 2 phrase not found, 3 already said that way.
+    Only code 0 leaves a file at the output path.
     Kept separate from `main` so a plugin tool can call it with a namespace it
     built itself instead of going through the command line.
     """
     doc = pymupdf.open(a.pdf)
+    if not doc.is_pdf:
+        # PyMuPDF also opens text, images, EPUB, XPS ... as documents, and
+        # the PDF-only calls below fail on them (some PyMuPDF versions
+        # segfault in read_contents on a .txt). Refuse up front.
+        doc.close()
+        raise SystemExit("%s is not a PDF" % a.pdf)
     if a.page >= doc.page_count:
         raise SystemExit("page %d out of range (%d pages)" % (a.page, doc.page_count))
     raw, blocks = page_blocks(doc, a.page)
@@ -534,6 +562,17 @@ def run(a):
         return 0
     if not a.find or a.replace is None:
         raise SystemExit("--find and --replace are required (or use --list)")
+    out = a.out or os.path.splitext(a.pdf)[0] + "_editado.pdf"
+    reason = out_path_problem(a.pdf, out)
+    if reason:
+        raise SystemExit("refusing output path: %s" % reason)
+    streams = doc[a.page].get_contents()
+    if len(streams) != 1:
+        # update_stream below rewrites one stream with the text of all of
+        # them; with several streams that duplicates every stream but the
+        # first on the page.
+        raise SystemExit("page %d has %d content streams; only single-stream "
+                         "pages are supported" % (a.page, len(streams)))
 
     hit = None
     for y, ln in group_lines(blocks).items():
@@ -616,17 +655,69 @@ def run(a):
         cursor = j + len(b.raw)
     out_parts.append(raw[cursor:])
 
-    doc.update_stream(doc[a.page].get_contents()[0],
-                      "".join(out_parts).encode("latin-1"), compress=True)
-    tmp = a.out or os.path.splitext(a.pdf)[0] + "_editado.pdf"
-    doc.save(tmp, garbage=0, deflate=True)
-    doc.close()
-    print("\nwrote %s (%d bytes)" % (tmp, os.path.getsize(tmp)))
+    doc.update_stream(streams[0], "".join(out_parts).encode("latin-1"),
+                      compress=True)
 
-    if a.no_verify:
-        return 0
-    return verify(a.pdf, tmp, a.page, y, a.find, a.replace, expected_line,
-                 raster=not a.no_raster)
+    # Write next to the destination under a temporary name, verify that, and
+    # only then move it into place. A failed check (or a crash) leaves
+    # nothing at `out`.
+    fd, tmp = tempfile.mkstemp(prefix=".pdf-surgeon-", suffix=".pdf",
+                               dir=os.path.dirname(os.path.abspath(out)))
+    os.close(fd)
+    try:
+        doc.save(tmp, garbage=0, deflate=True)
+        doc.close()
+        if a.no_verify:
+            print("\nverification skipped (--no-verify)")
+            code = 0
+        else:
+            code = verify(a.pdf, tmp, a.page, y, a.find, a.replace,
+                          expected_line, raster=not a.no_raster)
+        if code == 0:
+            publish(tmp, out)
+            print("\nwrote %s (%d bytes)" % (out, os.path.getsize(out)))
+        else:
+            print("\nverification failed: nothing written to %s" % out)
+        return code
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def out_path_problem(src, out):
+    """Why `out` is not an acceptable destination, or '' when it is.
+
+    The output path comes from the caller (a model, when this runs as a
+    tool), so it is held to: a .pdf name, not already present -- which also
+    rules out the input itself and anything a symlink points at -- and an
+    existing parent directory.
+    """
+    if not out.lower().endswith(".pdf"):
+        return "%s does not end in .pdf" % out
+    if os.path.lexists(out):
+        return "%s already exists; choose a new file name" % out
+    if os.path.realpath(out) == os.path.realpath(src):
+        return "%s is the input file" % out
+    parent = os.path.dirname(os.path.abspath(out))
+    if not os.path.isdir(parent):
+        return "directory %s does not exist" % parent
+    return ""
+
+
+def publish(tmp, out):
+    """Move the verified temp file to `out` without replacing anything that
+    appeared there in the meantime."""
+    try:
+        os.link(tmp, out)                  # fails if `out` exists
+    except FileExistsError:
+        raise SystemExit("refusing output path: %s appeared while editing"
+                         % out)
+    except (AttributeError, NotImplementedError, OSError):
+        # no hard links on this filesystem: check, then rename
+        if os.path.lexists(out):
+            raise SystemExit("refusing output path: %s appeared while editing"
+                             % out)
+        os.replace(tmp, out)
 
 
 class _Opts:
@@ -655,7 +746,9 @@ def replace_text(pdf, find=None, replace=None, out=None, page=0,
 
     `SystemExit` from the CLI path is caught and turned into a report line --
     every refusal in here (missing page, no text blocks, no usable font,
-    missing glyphs) is one, and raising out of a library call is unhelpful.
+    missing glyphs, unacceptable output path) is one, and raising out of a
+    library call is unhelpful. Any other exception (a file PyMuPDF cannot
+    open, say) is reported the same way.
 
     `list_lines` prints each line's block layout and returns without editing,
     which is what a caller should do before choosing what to replace.
@@ -670,6 +763,9 @@ def replace_text(pdf, find=None, replace=None, out=None, page=0,
             code = run(opts)
     except SystemExit as exc:
         buf.write("%s\n" % exc)
+        return 2, buf.getvalue()
+    except Exception as exc:               # unreadable file, bad page, ...
+        buf.write("error: %s: %s\n" % (type(exc).__name__, exc))
         return 2, buf.getvalue()
     return code, buf.getvalue()
 
