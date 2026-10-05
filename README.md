@@ -76,6 +76,14 @@ moved to `out` only if verification passes. Refusals and failed verifications
 leave no output file behind. With `verify=false` the file is written
 unchecked.
 
+**The output is `0600`** (owner read/write only), because it inherits the mode
+of the temporary file it is moved from. This is deliberate — the input PDF may
+have been readable by other users on a shared host and the edited copy should
+not silently widen or preserve that. The practical consequence: on a shared
+machine another user cannot open the result until you `chmod` it. If you are
+scripting against this and need a different mode, `chmod` the output
+afterwards; there is no option to set it, on purpose.
+
 ## Disclosure
 
 For the catalog reviewer, stated plainly so it does not have to be inferred:
@@ -108,7 +116,21 @@ digital signature no longer validates. The Info dictionary (producer,
 modification date) is left as it was. Use it on documents you are entitled
 to change.
 
-## License note
+## License
+
+This plugin is licensed under the **GNU Affero General Public License v3.0 or
+later** — see [`LICENSE`](LICENSE) for the full text.
+
+AGPL-3.0 is a deliberate choice rather than a default. The plugin imports
+PyMuPDF, which is itself AGPL-3.0 (or commercially licensed from Artifex), and
+the license of a repository that depends on an AGPL library is worth settling
+openly instead of by accident. If you redistribute this plugin alongside
+PyMuPDF, or run it as a network service, the AGPL terms apply to the combined
+work; check that they work for you. If your situation needs a permissive
+license or a commercial one, that is a conversation to have deliberately — it
+is not something to work around by relabelling the repository.
+
+## License note (dependency)
 
 PyMuPDF is licensed under the GNU AGPL-3.0 (or a commercial license from
 Artifex). This plugin imports it at runtime; if you redistribute the plugin

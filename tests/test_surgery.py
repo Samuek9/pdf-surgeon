@@ -1,6 +1,7 @@
 import os
 
 import pymupdf
+import pytest
 
 from conftest import make_pdf
 
@@ -46,10 +47,18 @@ def test_refuses_existing_pdf_out(plugin, sample, tmp_path):
 
 
 def test_refuses_symlink_out(plugin, sample, tmp_path):
+    # Creating a symlink needs elevation on Windows (WinError 1314) and is not
+    # available in some hardened Linux setups. Without this the test errors in
+    # its own body before reaching the plugin, which reads as a real failure.
+    if not hasattr(os, "symlink"):
+        pytest.skip("os.symlink unavailable on this platform")
     target = tmp_path / "config.yaml"
     target.write_text("model: x\n")
     link = tmp_path / "link.pdf"
-    os.symlink(target, link)
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create symlinks here: {exc}")
     report = plugin._handle_pdf_replace_text({
         "action": "replace", "pdf": sample, "out": str(link),
         "find": "six", "replace": "five"})
